@@ -318,7 +318,7 @@ label.btn{display:inline-flex; align-items:center}
 <div class="toast" id="toast" hidden></div>
 
 <script>
-const HOLES = 7, MAX = 8, POINTS = {1:5, 2:3, 3:1};
+const HOLES = 7, MAX = 8, POINTS = {1:5, 2:3, 3:1}, MINP = 2, MAXP = 5;
 const VIEWS = ['jugar','estadisticas','historial','jugadores'];
 const SITE = 'https://claude.ai/artifact/9xwN48hN3SPmPE2zvrMFQf';
 const INVITE = `¡Hola! Te invitamos a sumarte al *TORNEO OPEN LENCA* de minigolf ⛳
@@ -443,8 +443,9 @@ function onSnap(snap){
 
 /* ---------- Lógica de juego ---------- */
 function newTournament(){
-  const names = S.form.names.map(n => n.trim()).filter(Boolean);
-  if (names.length < 2) { toast('Escribe al menos 2 jugadores.'); return; }
+  const blank = S.form.names.findIndex(n => !n.trim());
+  if (blank >= 0) { toast('Escribe el nombre del jugador ' + (blank + 1) + ' o quítalo.'); document.getElementById('pname-' + blank)?.focus(); return; }
+  const names = S.form.names.map(n => n.trim());
   if (new Set(names.map(key)).size !== names.length) { toast('Hay nombres repetidos. Usa un nombre distinto para cada jugador.'); return; }
   const now = Date.now(), year = new Date(now).getFullYear();
   const n = S.tours.filter(t => t.year === year).length + 1;
@@ -628,6 +629,7 @@ function playPanel(t){
     </div>
     ${controls}
     <div class="order" aria-label="Orden en este hoyo">${order}</div>
+    ${!S.readOnly && !t.moves.length && n > MINP ? `<div class="play-foot" style="justify-content:flex-start"><span class="sub">Antes del primer golpe puedes quitar a un jugador:</span>${t.players.map((name, p) => `<button class="btn btn-ghost" style="min-height:36px;padding:4px 12px;font-size:14px" data-act="rm-tp" data-id="${t.id}" data-p="${p}" aria-label="Quitar a ${esc(name)} del torneo">Quitar ${esc(name)}</button>`).join('')}</div>` : ''}
     ${S.readOnly ? '' : `<div class="play-foot"><button class="btn btn-ghost" data-act="undo" ${!t.moves.length ? 'disabled' : ''}>Deshacer último golpe</button><span class="sub">Se tira por turnos: un golpe cada jugador, en orden, hasta que todos emboquen.</span></div>`}
   </section>
   <section class="card stack"><div class="row between"><h2>Tarjeta · ronda ${c.r + 1}</h2><span class="tag live">En juego</span></div>${scorecard(t, c.r, true)}</section>
@@ -637,18 +639,23 @@ function playPanel(t){
 function setupForm(){
   if (!S.form) {
     const last = S.tours[0];
-    const names = last ? last.players.slice(0, 5) : [];
-    while (names.length < 5) names.push('');
+    const names = last ? last.players.slice(0, MAXP) : [];
+    while (names.length < MINP) names.push('');
     S.form = {names, rounds: last ? last.rounds : 3, name:''};
   }
-  const f = S.form;
+  const f = S.form, count = f.names.length;
   return `<section class="card stack" aria-label="Nuevo torneo">
-    <div><h2>Nuevo torneo</h2><p class="sub">Escribe los jugadores en el orden en que van a tirar y toca el círculo para agregar su foto. Deja vacío un casillero si juegan menos de 5.</p></div>
+    <div><h2>Nuevo torneo</h2><p class="sub">Elige cuántos juegan y escribe los nombres en el orden en que van a tirar. Toca el círculo para agregar la foto.</p></div>
+    <div class="field" style="font-size:14px;font-weight:600">Cantidad de jugadores
+      <div class="seg" role="group" aria-label="Cantidad de jugadores">${Array.from({length: MAXP - MINP + 1}, (_, k) => MINP + k).map(n => `<button type="button" data-act="count" data-n="${n}" aria-pressed="${count === n}">${n}</button>`).join('')}</div>
+    </div>
     <div class="players-grid">${f.names.map((n, i) => `<div class="slot">
       <label class="photo-btn" for="pfile-${i}"><span id="av-${i}">${avatar(n, 64)}</span><span id="avl-${i}">${photoOf(n) ? 'Cambiar foto' : 'Agregar foto'}</span></label>
       <input type="file" accept="image/*" id="pfile-${i}" data-photo="${i}" class="vh" ${S.readOnly ? 'disabled' : ''}>
       <label class="field">Jugador ${i + 1}<input type="text" id="pname-${i}" data-name="${i}" value="${esc(n)}" maxlength="24" autocomplete="off" placeholder="Nombre"></label>
+      ${count > MINP ? `<button type="button" class="btn btn-link" data-act="rm-slot" data-i="${i}" aria-label="Quitar al jugador ${i + 1}">Quitar</button>` : ''}
     </div>`).join('')}</div>
+    ${count < MAXP ? `<div><button type="button" class="btn" data-act="add-slot">Agregar jugador</button></div>` : ''}
     ${(() => { const known = Object.values(PL).filter(p => p.name && !f.names.some(n => n.trim() && key(n) === key(p.name)));
       return known.length ? `<div class="row"><span class="eyebrow">Jugadores registrados:</span>${known.map(p => `<button type="button" class="btn known" data-act="pick" data-name="${esc(p.name)}">${avatar(p.name, 28)}${esc(p.name)}</button>`).join('')}</div>` : ''; })()}
     <div class="row" style="gap:18px;align-items:flex-end">
@@ -805,9 +812,26 @@ document.addEventListener('click', e => {
     case 'undo': if (t && !S.readOnly) undo(t); break;
     case 'rounds': S.form.rounds = +el.dataset.r; render(); break;
     case 'pick': {
-      const i = S.form.names.findIndex(n => !n.trim());
-      if (i < 0) { toast('Los 5 casilleros están ocupados. Borra un nombre para agregar a ' + el.dataset.name + '.'); break; }
+      let i = S.form.names.findIndex(n => !n.trim());
+      if (i < 0 && S.form.names.length < MAXP) i = S.form.names.push('') - 1;
+      if (i < 0) { toast('Ya hay ' + MAXP + ' jugadores. Quita uno para agregar a ' + el.dataset.name + '.'); break; }
       S.form.names[i] = el.dataset.name; render(); break;
+    }
+    case 'count': {
+      const n = +el.dataset.n, f = S.form.names;
+      while (f.length < n) f.push('');
+      // Al bajar la cantidad se quitan primero los casilleros vacíos, desde el final
+      while (f.length > n) { const e = f.map(x => !x.trim()).lastIndexOf(true); f.splice(e >= 0 ? e : f.length - 1, 1); }
+      render(); break;
+    }
+    case 'add-slot': if (S.form.names.length < MAXP) { S.form.names.push(''); render(); document.getElementById('pname-' + (S.form.names.length - 1))?.focus(); } break;
+    case 'rm-slot': if (S.form.names.length > MINP) { S.form.names.splice(+el.dataset.i, 1); render(); } break;
+    case 'rm-tp': {
+      const tt = S.tours.find(x => x.id === el.dataset.id);
+      if (!tt || tt.moves.length || S.readOnly) break;
+      if (tt.players.length <= MINP) { toast('Un torneo necesita al menos ' + MINP + ' jugadores.'); break; }
+      const gone = tt.players.splice(+el.dataset.p, 1)[0];
+      rebuild(tt); save(tt); toast(gone + ' salió del torneo.'); break;
     }
     case 'start': if (!S.readOnly) newTournament(); break;
     case 'show-form': S.showForm = true; render(); break;

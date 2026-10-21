@@ -1,5 +1,5 @@
 // Guarda la app en el teléfono para que abra sin internet. Cambia la versión para forzar una actualización.
-const CACHE = 'open-lenca-v1';
+const CACHE = 'open-lenca-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
