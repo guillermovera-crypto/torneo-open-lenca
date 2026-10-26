@@ -219,8 +219,21 @@ tr.row-link:hover td{background:var(--surface-2)}
 .pcard{display:flex; flex-direction:column; align-items:center; gap:6px; text-align:center; padding:16px 12px; border:1px solid var(--line); border-radius:12px; background:var(--bg); min-width:0}
 .pcard .pname{font-weight:700; font-size:17px; overflow-wrap:anywhere}
 label.btn{display:inline-flex; align-items:center}
+/* Pausa entre hoyos, resultado final y entrenamiento */
+.play-actions.one{grid-template-columns:1fr}
+.waitbox{margin-block:18px 16px}
+.waitbox .who{font:700 clamp(28px, 7vw, 44px)/1.05 var(--f-body)}
+.paused-chip{display:inline-block; margin-left:6px; font:700 12px var(--f-body); letter-spacing:.08em; text-transform:uppercase; background:var(--flag); color:var(--flag-ink); border-radius:6px; padding:2px 7px}
+.winner{display:grid; grid-template-columns:auto 1fr; gap:18px; align-items:center; background:var(--surface); border:2px solid var(--gold); border-radius:14px; padding:18px 20px}
+.winner.prac{border-color:var(--petrol)}
+.winner .trophy{width:72px; height:72px}
+.winner > .av{border-color:var(--gold); border-width:3px}
+.winner .bname{font:700 clamp(26px, 6vw, 36px)/1.1 var(--f-body); overflow-wrap:anywhere}
+.tag.prac{background:var(--petrol); color:#fff}
+.tag.pts{background:var(--gold); color:var(--flag-ink)}
 @media (max-width:520px){
   .card{padding:16px}
+  .winner{grid-template-columns:1fr; justify-items:start}
   .play-actions .btn{min-height:70px; font-size:17px}
   .turn{grid-template-columns:1fr; gap:12px}
   .turn-who > div{flex:1}
@@ -270,7 +283,11 @@ label.btn{display:inline-flex; align-items:center}
 <div class="toast" id="toast" hidden></div>
 
 <script>
-const HOLES = 7, MAX = 8, POINTS = {1:5, 2:3, 3:1}, MINP = 2, MAXP = 5;
+const HOLES = 7, MAX = 8, POINTS = {1:5, 2:3, 3:1}, MINP = 1, MAXP = 5;
+/* Marcas en la lista de movimientos (además de los golpes [jugador, embocó, hora]): */
+const M_START = -1, M_PAUSE = -2, M_RESUME = -3;
+const isPractice = t => t.players.length === 1;  // juego solo = entrenamiento, no suma puntos
+const hasStrokes = t => t.moves.some(m => m[0] >= 0);
 const VIEWS = ['jugar','estadisticas','historial','jugadores'];
 const SITE = 'https://claude.ai/artifact/9xwN48hN3SPmPE2zvrMFQf';
 const INVITE = `¡Hola! Te invitamos a sumarte al *TORNEO OPEN LENCA* de minigolf ⛳
@@ -455,40 +472,69 @@ function newTournament(){
   const names = S.form.names.map(n => n.trim());
   if (new Set(names.map(key)).size !== names.length) { toast('Hay nombres repetidos. Usa un nombre distinto para cada jugador.'); return; }
   const now = Date.now(), year = new Date(now).getFullYear();
-  const n = S.tours.filter(t => t.year === year).length + 1;
+  const prac = names.length === 1;
+  const n = S.tours.filter(t => t.year === year && isPractice(t) === prac).length + 1;
   const id = 't' + now.toString(36) + Math.random().toString(36).slice(2, 6);
-  const t = { id, _new:true, name: S.form.name.trim() || ('Open Lenca #' + n + ' · ' + year), createdAt: now, year, rounds: S.form.rounds, players: names, moves: [], rev:0 };
+  const auto = prac ? 'Entrenamiento #' + n + ' · ' + names[0] : 'Open Lenca #' + n + ' · ' + year;
+  // v:2 = reloj con pausa: cada hoyo empieza con "Comenzar hoyo" y entre hoyos el tiempo no corre.
+  const t = { id, _new:true, v:2, name: S.form.name.trim() || auto, createdAt: now, year, rounds: S.form.rounds, players: names, moves: [], rev:0 };
   rebuild(t);
-  S.playId = id; S.showForm = false; S.form.name = '';
+  S.playId = id; S.showForm = false; S.form.name = ''; S.justDone = null;
   save(t);
 }
 /* Cada golpe es un movimiento [jugador, embocó 0/1, hora]. En cada hoyo se tira por rondas de golpes:
-   jugador 1, 2, 3… y vuelta al primero que no haya embocado. La tarjeta (log) y el turno (cur) se derivan de la lista. */
+   jugador 1, 2, 3… y vuelta al primero que no haya embocado. La tarjeta (log) y el turno (cur) se derivan de la lista.
+   Marcas del reloj (torneos v2): [-1,0,hora] comenzar hoyo · [-2,0,hora] pausa · [-3,0,hora] reanudar.
+   Entre hoyos el reloj queda detenido ("en traslado") hasta que se toca Comenzar; las pausas (pz) se descuentan. */
 function rebuild(t){
-  const n = t.players.length, log = [];
+  const n = t.players.length, log = [], paced = (t.v || 1) >= 2;
   let r = 0, h = 0, p = 0, gs = Array(n).fill(0), done = Array(n).fill(false), holeStart = t.createdAt, last = t.createdAt;
+  let waiting = paced, paused = false, pausedAt = 0, pz = 0;
   for (const [mp, holed, ts] of t.moves) {
-    gs[mp]++; last = ts;
-    if (holed || gs[mp] >= MAX) { done[mp] = true; log.push({r, h, p:mp, s:gs[mp], t0:holeStart, t1:ts}); }
+    last = ts;
+    if (mp === M_START) { if (waiting) { waiting = false; holeStart = ts; pz = 0; } continue; }
+    if (mp === M_PAUSE) { if (!waiting && !paused) { paused = true; pausedAt = ts; } continue; }
+    if (mp === M_RESUME) { if (paused) { pz += ts - pausedAt; paused = false; } continue; }
+    if (!(mp >= 0 && mp < n)) continue;
+    if (waiting) { waiting = false; holeStart = ts; pz = 0; }
+    if (paused) { pz += ts - pausedAt; paused = false; }
+    gs[mp]++;
+    if (holed || gs[mp] >= MAX) { done[mp] = true; log.push({r, h, p:mp, s:gs[mp], t0:holeStart, t1:ts, pz}); }
     if (done.every(Boolean)) {
       h++; if (h >= HOLES) { h = 0; r++; }
-      p = 0; gs = Array(n).fill(0); done = Array(n).fill(false); holeStart = ts;
+      p = 0; gs = Array(n).fill(0); done = Array(n).fill(false); holeStart = ts; pz = 0; waiting = paced;
     } else {
       for (let k = 1; k <= n; k++) { const q = (mp + k) % n; if (!done[q]) { p = q; break; } }
     }
   }
   t.log = log;
   if (r >= t.rounds) { t.cur = null; t.status = 'done'; t.finishedAt = last; }
-  else { t.cur = {r, h, p, gs, done, t0:holeStart}; t.status = 'playing'; delete t.finishedAt; }
+  else { t.cur = {r, h, p, gs, done, t0:holeStart, pz, waiting, paused, pausedAt}; t.status = 'playing'; delete t.finishedAt; }
 }
+function mark(t, code){ t.moves.push([code, 0, Date.now()]); rebuild(t); save(t); }
+function startHole(t){ if (t.cur && t.cur.waiting) mark(t, M_START); }
+function pauseHole(t){ if (t.cur && !t.cur.waiting && !t.cur.paused) { mark(t, M_PAUSE); toast('Reloj en pausa. Toca Reanudar hoyo para seguir.'); } }
+function resumeHole(t){ if (t.cur && t.cur.paused) mark(t, M_RESUME); }
 function addMove(t, holed){
+  if (!t.cur || t.cur.waiting || t.cur.paused) return;
   t.moves.push([t.cur.p, holed ? 1 : 0, Date.now()]);
   rebuild(t);
+  if (t.status === 'done') S.justDone = t.id;
   save(t);
-  if (t.status === 'done') toast('Torneo terminado. ¡Felicitaciones al podio! Guarda un respaldo del historial.');
+  if (t.status === 'done') {
+    if (isPractice(t)) toast('Entrenamiento terminado: ' + plural(ranking(t)[0].tot, 'golpe', 'golpes') + '.');
+    else { const w = ranking(t).filter(r => r.rank === 1).map(r => r.name).join(' y '); toast('¡Torneo terminado! Ganó ' + w + '. Guarda un respaldo del historial.'); }
+    window.scrollTo(0, 0);
+  }
+}
+/* Qué borra "Deshacer": las pausas del final se quitan sin preguntar; luego el último golpe o el último "Comenzar hoyo". */
+function lastUndoable(t){
+  for (let i = t.moves.length - 1; i >= 0; i--) { const c = t.moves[i][0]; if (c !== M_PAUSE && c !== M_RESUME) return c; }
+  return null;
 }
 function undo(t){
-  if (!t.moves.length) return;
+  while (t.moves.length && (t.moves[t.moves.length - 1][0] === M_PAUSE || t.moves[t.moves.length - 1][0] === M_RESUME)) t.moves.pop();
+  if (!t.moves.length) { rebuild(t); save(t); return; }
   t.moves.pop();
   rebuild(t);
   save(t);
@@ -523,7 +569,7 @@ function compute(list){
       strokes += e.s; turns++; if (e.s === 1) ones++;
       const p = getP(t.players[e.p]);
       p.strokes += e.s; p.holes++; if (e.s === 1) p.ones++;
-      const d = e.t1 - e.t0;
+      const d = e.t1 - e.t0 - (e.pz || 0);
       if (d > 0) { p.turnMs += d; p.turnN++; if (!fastTurn || d < fastTurn.d) fastTurn = {d, name:t.players[e.p], h:e.h, s:e.s, t}; }
       const hh = H[e.h]; hh.strokes += e.s; hh.turns++; if (e.s === 1) hh.ones++;
       (byRH[e.r + '|' + e.h] ||= []).push(e);
@@ -533,7 +579,7 @@ function compute(list){
     for (const k in byRH) {
       const arr = byRH[k]; if (arr.length !== n) continue;
       const [r, h] = k.split('|').map(Number);
-      const d = Math.max(...arr.map(e => e.t1)) - Math.min(...arr.map(e => e.t0));
+      const d = Math.max(...arr.map(e => e.t1 - e.t0 - (e.pz || 0)));
       const s = arr.reduce((a, e) => a + e.s, 0);
       H[h].durs.push(d);
       if (!fastHole || d < fastHole.d) fastHole = {d, h, r, s, t};
@@ -543,6 +589,7 @@ function compute(list){
     for (const r in perRound) if (perRound[r] === HOLES * n) rounds++;
     if (t.status === 'done') {
       done++;
+      if (isPractice(t)) { getP(t.players[0]).done++; continue; }
       for (const row of ranking(t)) { const p = getP(row.name); p.done++; if (row.rank === 1) p.wins++; if (row.rank <= 3) p.podiums++; p.points += POINTS[row.rank] || 0; }
     }
   }
@@ -608,41 +655,79 @@ function rankTable(t){
   </tbody></table></div>`;
 }
 
+/* Ganador y top 3 del torneo terminado, con los puntos que suma al ranking del año */
+function finalResult(t){
+  const rk = ranking(t);
+  if (isPractice(t)) {
+    const r = rk[0];
+    return `<div class="winner prac">${avatar(r.name, 72)}<div style="min-width:0"><div class="eyebrow">Entrenamiento terminado</div><div class="bname">${esc(r.name)}</div><p class="sub">${plural(r.tot, 'golpe', 'golpes')} en ${plural(r.holes, 'hoyo', 'hoyos')} · ${f1(avg(r.tot, r.holes))} por hoyo · ${plural(r.ones, 'hoyo en uno', 'hoyos en uno')}. Es práctica: no suma puntos al ranking.</p></div></div>`;
+  }
+  const yr = compute(S.tours.filter(x => x.year === t.year && !isPractice(x))).players;
+  const yp = name => yr.find(p => key(p.name) === key(name));
+  const ypos = name => { const i = yr.findIndex(p => key(p.name) === key(name)); return i >= 0 ? (i + 1) + '°' : '–'; };
+  const win = rk.filter(r => r.rank === 1), top = rk.filter(r => r.rank <= 3), w0 = win[0];
+  return `<div class="winner">${win.length === 1 ? avatar(w0.name, 84) : TROPHY_SVG}<div style="min-width:0"><div class="eyebrow">${win.length > 1 ? 'Ganadores del torneo · empate' : 'Ganador del torneo'}</div><div class="bname">${win.map(r => esc(r.name)).join(' / ')}</div><p class="sub">${plural(w0.tot, 'golpe', 'golpes')} · ${f1(avg(w0.tot, w0.holes))} por hoyo · ${plural(w0.ones, 'hoyo en uno', 'hoyos en uno')} <span class="tag pts">+${POINTS[1]} puntos ${t.year}</span></p></div></div>
+  <div class="stack" style="gap:6px"><h3>Top 3 del torneo</h3><p class="sub">Puntos ganados en esta competencia y cómo queda cada uno en el ranking ${t.year}.</p></div>
+  <div class="tscroll"><table><thead><tr><th scope="col">Pos.</th><th scope="col" style="text-align:left">Jugador</th><th scope="col">Golpes</th><th scope="col">Promedio</th><th scope="col">Hoyos en 1</th><th scope="col">Puntos ganados</th><th scope="col">Puntos ${t.year}</th><th scope="col">Lugar ${t.year}</th></tr></thead><tbody>
+    ${top.map(r => `<tr><td>${r.rank}°</td><td class="name" style="text-align:left">${who(r.name, 28)}</td><td class="tot">${r.tot}</td><td>${f1(avg(r.tot, r.holes))}</td><td>${r.ones}</td><td class="tot">+${POINTS[r.rank] || 0}</td><td>${(yp(r.name) || {points:0}).points}</td><td>${ypos(r.name)}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+const resultBlock = t => (isPractice(t) ? '' : podium(t)) + finalResult(t);
+
 function confirmBox(id){
   if (!S.confirm || S.confirm !== id) return `<button class="btn btn-danger" data-act="ask-del" data-id="${id}">Eliminar torneo</button>`;
   return `<div class="confirm"><span>¿Eliminar este torneo y todos sus golpes? No se puede deshacer.</span><button class="btn btn-danger" data-act="del" data-id="${id}">Sí, eliminar</button><button class="btn" data-act="cancel-del">Cancelar</button></div>`;
 }
 
 function playPanel(t){
-  const c = t.cur, n = t.players.length;
+  const c = t.cur, n = t.players.length, prac = isPractice(t), started = hasStrokes(t);
   const order = t.players.map((name, p) => {
-    const cls = p === c.p ? 'now' : c.done[p] ? 'done' : '';
+    const cls = !c.waiting && p === c.p ? 'now' : c.done[p] ? 'done' : '';
     const info = c.done[p] ? ` · embocó en ${c.gs[p]}` : c.gs[p] ? ` · ${c.gs[p]}` : '';
     return `<span class="pchip ${cls}">${avatar(name, 24)}${esc(name)}${info}</span>`;
   }).join('');
   const g = c.gs[c.p], next = g + 1;
-  const controls = S.readOnly
-    ? `<p class="sub" style="margin-top:12px">Estás siguiendo el juego en vivo. Solo quien tiene permiso de edición registra golpes.</p>`
-    : `<div class="play-actions">
+  const spent = (c.paused ? c.pausedAt : Date.now()) - c.t0 - (c.pz || 0);
+  let turn, controls;
+  if (c.waiting) {
+    const where = c.h === 0 && c.r > 0 ? ` · ronda ${c.r + 1}` : '';
+    turn = `<div class="waitbox"><div class="eyebrow">${started ? 'En traslado · reloj detenido' : 'Listos para empezar'}</div><div class="who">Hoyo ${c.h + 1}${where}</div><p class="sub" style="margin-top:6px">${started ? 'El tiempo no corre mientras caminan al siguiente hoyo. Toquen Comenzar cuando estén listos para tirar.' : 'El reloj empieza a correr cuando toquen Comenzar.'}</p></div>`;
+    controls = S.readOnly
+      ? `<p class="sub" style="margin-top:12px">Esperando que comience el hoyo ${c.h + 1}.</p>`
+      : `<div class="play-actions one"><button class="btn embo" data-act="start-hole">Comenzar hoyo ${c.h + 1}<small>tira primero ${esc(t.players[c.p])}</small></button></div>`;
+  } else {
+    const clock = c.paused
+      ? `<span class="num">${fmtDur(spent)}</span><span class="paused-chip">En pausa</span>`
+      : `<span class="num" data-since="${c.t0 + (c.pz || 0)}">${fmtDur(spent)}</span>`;
+    turn = `<div class="turn">
+      <div class="turn-who">${avatar(t.players[c.p], 84)}<div style="min-width:0"><div class="eyebrow">Turno de · golpe ${next}</div><div class="who">${esc(t.players[c.p])}</div><div class="sub">Tiempo en este hoyo ${clock}</div></div></div>
+      <div class="counter"><b class="num">${g}</b><span>golpes en este hoyo</span></div>
+    </div>`;
+    controls = S.readOnly
+      ? `<p class="sub" style="margin-top:12px">Estás siguiendo el juego en vivo. Solo quien tiene permiso de edición registra golpes.</p>`
+      : c.paused
+        ? `<div class="play-actions one"><button class="btn embo" data-act="resume">Reanudar hoyo ${c.h + 1}<small>el reloj está detenido</small></button></div>`
+        : `<div class="play-actions">
         <button class="btn golpe" data-act="golpe">Golpe<small>${next >= MAX ? `cierra el hoyo con ${MAX}` : 'la bola no entró'}</small></button>
         <button class="btn embo" data-act="embo">Embocó<small>hoyo en ${plural(next, 'golpe', 'golpes')}</small></button>
       </div>`;
+  }
+  const lu = lastUndoable(t);
+  const undoLabel = lu === M_START ? 'Deshacer “Comenzar hoyo”' : 'Deshacer último golpe';
+  const hint = prac ? 'Juego solo: anota cada golpe hasta embocar.' : 'Se tira por turnos: un golpe cada jugador, en orden, hasta que todos emboquen.';
   return `<section class="card play" aria-label="Turno actual">
     <div class="play-top">
-      <div><div class="eyebrow">${esc(t.name)}</div><div class="sub">Ronda ${c.r + 1} de ${t.rounds} · ${n} jugadores · máx. ${MAX} golpes por hoyo</div></div>
+      <div><div class="eyebrow">${esc(t.name)}</div><div class="sub">Ronda ${c.r + 1} de ${t.rounds} · ${prac ? 'entrenamiento, sin puntos' : n + ' jugadores'} · máx. ${MAX} golpes por hoyo</div></div>
       <span class="holechip">HOYO ${c.h + 1}/${HOLES}</span>
     </div>
-    <div class="turn">
-      <div class="turn-who">${avatar(t.players[c.p], 84)}<div style="min-width:0"><div class="eyebrow">Turno de · golpe ${next}</div><div class="who">${esc(t.players[c.p])}</div><div class="sub">Tiempo en este hoyo <span class="num" data-since="${c.t0}">${fmtDur(Date.now() - c.t0)}</span></div></div></div>
-      <div class="counter"><b class="num">${g}</b><span>golpes en este hoyo</span></div>
-    </div>
+    ${turn}
     ${controls}
     <div class="order" aria-label="Orden en este hoyo">${order}</div>
-    ${!S.readOnly && !t.moves.length && n > MINP ? `<div class="play-foot" style="justify-content:flex-start"><span class="sub">Antes del primer golpe puedes quitar a un jugador:</span>${t.players.map((name, p) => `<button class="btn btn-ghost" style="min-height:36px;padding:4px 12px;font-size:14px" data-act="rm-tp" data-id="${t.id}" data-p="${p}" aria-label="Quitar a ${esc(name)} del torneo">Quitar ${esc(name)}</button>`).join('')}</div>` : ''}
-    ${S.readOnly ? '' : `<div class="play-foot"><button class="btn btn-ghost" data-act="undo" ${!t.moves.length ? 'disabled' : ''}>Deshacer último golpe</button><span class="sub">Se tira por turnos: un golpe cada jugador, en orden, hasta que todos emboquen.</span></div>`}
+    ${!S.readOnly && !started && n > MINP ? `<div class="play-foot" style="justify-content:flex-start"><span class="sub">Antes del primer golpe puedes quitar a un jugador:</span>${t.players.map((name, p) => `<button class="btn btn-ghost" style="min-height:36px;padding:4px 12px;font-size:14px" data-act="rm-tp" data-id="${t.id}" data-p="${p}" aria-label="Quitar a ${esc(name)} del torneo">Quitar ${esc(name)}</button>`).join('')}</div>` : ''}
+    ${S.readOnly ? '' : `<div class="play-foot"><div class="row"><button class="btn btn-ghost" data-act="undo" ${lu === null ? 'disabled' : ''}>${undoLabel}</button>${!c.waiting && !c.paused ? '<button class="btn btn-ghost" data-act="pause">Pausar reloj</button>' : ''}</div><span class="sub">${hint}</span></div>`}
   </section>
-  <section class="card stack"><div class="row between"><h2>Tarjeta · ronda ${c.r + 1}</h2><span class="tag live">En juego</span></div>${scorecard(t, c.r, true)}</section>
-  <section class="card stack"><h2>Clasificación parcial</h2>${rankTable(t)}${S.readOnly ? '' : `<div>${confirmBox(t.id)}</div>`}</section>`;
+  <section class="card stack"><div class="row between"><h2>Tarjeta · ronda ${c.r + 1}</h2><span class="tag live">En juego</span></div>${scorecard(t, c.r, !c.waiting)}</section>
+  <section class="card stack"><h2>${prac ? 'Resumen del entrenamiento' : 'Clasificación parcial'}</h2>${rankTable(t)}${S.readOnly ? '' : `<div>${confirmBox(t.id)}</div>`}</section>`;
 }
 
 function setupForm(){
@@ -654,7 +739,7 @@ function setupForm(){
   }
   const f = S.form, count = f.names.length;
   return `<section class="card stack" aria-label="Nuevo torneo">
-    <div><h2>Nuevo torneo</h2><p class="sub">Elige cuántos juegan y escribe los nombres en el orden en que van a tirar. Toca el círculo para agregar la foto.</p></div>
+    <div><h2>Nuevo torneo</h2><p class="sub">Elige cuántos juegan (1 = entrenamiento solo) y escribe los nombres en el orden en que van a tirar. Toca el círculo para agregar la foto.</p></div>
     <div class="field" style="font-size:14px;font-weight:600">Cantidad de jugadores
       <div class="seg" role="group" aria-label="Cantidad de jugadores">${Array.from({length: MAXP - MINP + 1}, (_, k) => MINP + k).map(n => `<button type="button" data-act="count" data-n="${n}" aria-pressed="${count === n}">${n}</button>`).join('')}</div>
     </div>
@@ -671,10 +756,11 @@ function setupForm(){
       <div class="field" style="font-size:14px;font-weight:600">Rondas de 7 hoyos
         <div class="seg" role="group" aria-label="Rondas">${[1,3,5].map(r => `<button type="button" data-act="rounds" data-r="${r}" aria-pressed="${f.rounds === r}">${r}</button>`).join('')}</div>
       </div>
-      <label class="field" style="flex:1;min-width:200px">Nombre del torneo (opcional)<input type="text" id="tname" data-tname value="${esc(f.name)}" maxlength="40" autocomplete="off" placeholder="Open Lenca #${S.tours.filter(t => t.year === new Date().getFullYear()).length + 1}"></label>
+      <label class="field" style="flex:1;min-width:200px">Nombre del torneo (opcional)<input type="text" id="tname" data-tname value="${esc(f.name)}" maxlength="40" autocomplete="off" placeholder="${count === 1 ? 'Entrenamiento #' + (S.tours.filter(t => t.year === new Date().getFullYear() && isPractice(t)).length + 1) + ' · ' + esc((f.names[0] || '').trim() || 'nombre') : 'Open Lenca #' + (S.tours.filter(t => t.year === new Date().getFullYear() && !isPractice(t)).length + 1)}"></label>
     </div>
-    <p class="note">Total: ${f.rounds * HOLES} hoyos por jugador. Gana quien suma menos golpes.</p>
-    <div class="row"><button class="btn btn-primary" data-act="start" ${S.readOnly ? 'disabled' : ''}>Empezar torneo</button>${S.showForm ? '<button class="btn" data-act="hide-form">Volver al juego</button>' : ''}</div>
+    <p class="note">Total: ${f.rounds * HOLES} hoyos por jugador. ${count === 1 ? 'Juegas solo: anota tus golpes y mide tu progreso.' : 'Gana quien suma menos golpes.'}</p>
+    ${count === 1 ? '<p class="note"><span class="tag prac" style="margin-left:0">Entrenamiento</span> Jugar solo es práctica: queda en el historial y en Estadísticas › Entrenamientos, pero no suma puntos, victorias ni podios al ranking del año.</p>' : ''}
+    <div class="row"><button class="btn btn-primary" data-act="start" ${S.readOnly ? 'disabled' : ''}>${count === 1 ? 'Empezar entrenamiento' : 'Empezar torneo'}</button>${S.showForm ? '<button class="btn" data-act="hide-form">Volver al juego</button>' : ''}</div>
     ${S.readOnly ? '<p class="note">Tienes acceso de solo lectura: puedes ver los torneos pero no crear uno.</p>' : ''}
   </section>`;
 }
@@ -684,10 +770,10 @@ function detail(t){
   const rounds = Array.from({length: live ? t.cur.r + 1 : t.rounds}, (_, r) => r);
   return `<div><button class="btn btn-link" data-act="close">← Volver al historial</button></div>
   <section class="card stack">
-    <div class="row between"><div><h2>${esc(t.name)}</h2><p class="sub">${fmtDate(t.createdAt)} · ${plural(t.rounds, 'ronda', 'rondas')} · ${t.players.length} jugadores</p></div><span class="tag ${live ? 'live' : 'fin'}">${live ? 'En juego' : 'Terminado'}</span></div>
-    ${live ? `<p class="note">Este torneo sigue en curso. <button class="btn btn-link" data-act="play" data-id="${t.id}">Ir a jugarlo</button></p>` : podium(t) + BACKUP_ROW}
+    <div class="row between"><div><h2>${esc(t.name)}</h2><p class="sub">${fmtDate(t.createdAt)} · ${plural(t.rounds, 'ronda', 'rondas')} · ${isPractice(t) ? 'entrenamiento' : t.players.length + ' jugadores'}</p></div><div>${isPractice(t) ? '<span class="tag prac">Entrenamiento</span>' : ''}<span class="tag ${live ? 'live' : 'fin'}">${live ? 'En juego' : 'Terminado'}</span></div></div>
+    ${live ? `<p class="note">Este torneo sigue en curso. <button class="btn btn-link" data-act="play" data-id="${t.id}">Ir a jugarlo</button></p>` : resultBlock(t) + BACKUP_ROW}
   </section>
-  <section class="card stack"><h2>Clasificación</h2>${rankTable(t)}</section>
+  <section class="card stack"><h2>${isPractice(t) ? 'Resumen' : 'Clasificación completa'}</h2>${rankTable(t)}</section>
   ${rounds.map(r => `<section class="card stack"><h3>Ronda ${r + 1}</h3>${scorecard(t, r, live)}</section>`).join('')}
   ${S.readOnly ? '' : `<div>${confirmBox(t.id)}</div>`}`;
 }
@@ -699,21 +785,25 @@ function viewJugar(){
   if (playing.length && !S.showForm) {
     const t = playing.find(x => x.id === S.playId) || playing[0];
     if (playing.length > 1) html += `<div class="row" role="group" aria-label="Torneos en juego"><span class="eyebrow">En juego:</span>${playing.map(x => `<button class="btn ${x.id === t.id ? 'btn-primary' : ''}" data-act="play" data-id="${x.id}">${esc(x.name)}</button>`).join('')}</div>`;
+    const jd = S.justDone && S.tours.find(x => x.id === S.justDone && x.status === 'done');
+    if (jd) html += `<section class="card stack"><div class="row between"><div><div class="eyebrow">Recién terminado</div><h2>${esc(jd.name)}</h2></div><div class="row"><button class="btn" data-act="open" data-id="${jd.id}">Ver tarjeta</button><button class="btn btn-link" data-act="close-done">Cerrar</button></div></div>${resultBlock(jd)}</section>`;
     html += playPanel(t);
     if (!S.readOnly) html += `<div><button class="btn btn-link" data-act="show-form">Empezar otro torneo en paralelo</button></div>`;
     return html;
   }
-  const last = S.tours.find(t => t.status === 'done');
-  if (last && !S.showForm) html += `<section class="card stack"><div class="row between"><div><div class="eyebrow">Último torneo</div><h2>${esc(last.name)}</h2><p class="sub">${fmtDate(last.finishedAt || last.createdAt)} · ${plural(last.rounds, 'ronda', 'rondas')}</p></div><button class="btn" data-act="open" data-id="${last.id}">Ver tarjeta completa</button></div>${podium(last)}${BACKUP_ROW}${!S.readOnly && last.moves && last.moves.length ? `<p class="note" style="text-align:center">¿Se anotó mal el último golpe? <button class="btn btn-link" data-act="undo-done" data-id="${last.id}">Deshacer el último golpe y reabrir el torneo</button></p>` : ''}</section>`;
+  const done = S.tours.filter(t => t.status === 'done');
+  const last = done.find(t => t.id === S.justDone) || done.sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt))[0];
+  if (last && !S.showForm) html += `<section class="card stack"><div class="row between"><div><div class="eyebrow">${isPractice(last) ? 'Último entrenamiento' : 'Resultado final · último torneo'}</div><h2>${esc(last.name)}</h2><p class="sub">${fmtDate(last.finishedAt || last.createdAt)} · ${plural(last.rounds, 'ronda', 'rondas')}</p></div><button class="btn" data-act="open" data-id="${last.id}">Ver tarjeta completa</button></div>${resultBlock(last)}${BACKUP_ROW}${!S.readOnly && last.moves && last.moves.length ? `<p class="note" style="text-align:center">¿Se anotó mal el último golpe? <button class="btn btn-link" data-act="undo-done" data-id="${last.id}">Deshacer el último golpe y reabrir el torneo</button></p>` : ''}</section>`;
   if (!S.tours.length) html += `<section class="card empty">${FLAG_SVG}<h2>Aún no hay torneos</h2><p class="sub">Escribe los nombres abajo, elige 1, 3 o 5 rondas y pulsa “Empezar torneo”. El primer golpe abre la temporada.</p></section>`;
   return html + setupForm();
 }
 
 function viewStats(){
   if (S.status !== 'ready') return stateMsg();
-  const list = byYear(), m = compute(list), label = S.year === 'todos' ? 'todos los años' : S.year;
-  let html = `<div class="row between"><div><h2 style="margin:0;font-size:22px">Estadísticas de ${label}</h2><p class="sub">Se actualizan en vivo con cada golpe registrado.</p></div>${yearSelect()}</div>`;
-  if (!m.turns) return html + `<section class="card empty">${FLAG_SVG}<h2>Sin golpes registrados en ${label}</h2><p class="sub">Cuando se juegue el primer hoyo aparecerán aquí los totales, los récords y el mejor del año.</p></section>`;
+  const all = byYear(), list = all.filter(t => !isPractice(t)), m = compute(list), pm = compute(all.filter(isPractice)), label = S.year === 'todos' ? 'todos los años' : S.year;
+  let html = `<div class="row between"><div><h2 style="margin:0;font-size:22px">Estadísticas de ${label}</h2><p class="sub">Se actualizan en vivo con cada golpe registrado. Los entrenamientos (juego solo) van aparte y no suman puntos.</p></div>${yearSelect()}</div>`;
+  if (!m.turns && !pm.turns) return html + `<section class="card empty">${FLAG_SVG}<h2>Sin golpes registrados en ${label}</h2><p class="sub">Cuando se juegue el primer hoyo aparecerán aquí los totales, los récords y el mejor del año.</p></section>`;
+  if (!m.turns) return html + `<section class="card empty">${FLAG_SVG}<h2>Sin torneos de competencia en ${label}</h2><p class="sub">El ranking del año empieza con el primer torneo de 2 o más jugadores.</p></section>` + practiceCard(pm, label);
   html += `<div class="kpis">
     <div class="kpi"><b>${m.tours}</b><span>torneos (${m.done} terminados)</span></div>
     <div class="kpi"><b>${m.rounds}</b><span>partidas de 7 hoyos jugadas</span></div>
@@ -729,7 +819,7 @@ function viewStats(){
     ${m.players.map((p, i) => `<tr><td>${i + 1}</td><td class="name" style="text-align:left">${who(p.name, 28)}</td><td class="tot">${p.points}</td><td>${p.wins}</td><td>${p.podiums}</td><td>${p.tours}</td><td class="tot">${p.strokes}</td><td><div class="bar" aria-hidden="true"><i style="width:${(p.strokes / maxS * 100).toFixed(1)}%"></i></div></td><td>${p.holes}</td><td>${f1(p.avg)}</td><td>${isFinite(p.bestRound) ? p.bestRound : '–'}</td><td>${p.ones}</td><td>${p.turnN ? fmtDur(p.turnMs / p.turnN) : '–'}</td></tr>`).join('')}
     </tbody></table></div></section>`;
   const tagFor = h => [m.lowHole === h ? '<span class="tag low">Menos golpes</span>' : '', m.fastAvg === h ? '<span class="tag fast">Más rápido</span>' : '', m.longAvg === h && m.longAvg !== m.fastAvg ? '<span class="tag long">Más largo</span>' : ''].join('');
-  html += `<section class="card stack"><div><h2>Golpes por hoyo</h2><p class="sub">Promedio por jugador en cada hoyo. El tiempo cuenta desde que tira el primero hasta que emboca el último.</p></div>
+  html += `<section class="card stack"><div><h2>Golpes por hoyo</h2><p class="sub">Promedio por jugador en cada hoyo. El tiempo cuenta desde “Comenzar hoyo” hasta que emboca el último, sin traslados ni pausas.</p></div>
     <div class="tscroll"><table><thead><tr><th scope="col">Hoyo</th><th scope="col">Promedio</th><th scope="col">Golpes totales</th><th scope="col">Veces jugado</th><th scope="col">Hoyos en 1</th><th scope="col">Tiempo promedio</th></tr></thead><tbody>
     ${m.H.map(h => `<tr><td class="name">Hoyo ${h.h + 1} ${tagFor(h)}</td><td class="tot">${f1(h.avg)}</td><td>${h.strokes}</td><td>${h.durs.length}</td><td>${h.ones}</td><td>${fmtDur(h.avgDur)}</td></tr>`).join('')}
     </tbody></table></div></section>`;
@@ -741,7 +831,14 @@ function viewStats(){
     ${m.longHole ? rec('Hoyo ' + (m.longHole.h + 1) + ' · ' + fmtDur(m.longHole.d), 'Hoyo más largo de terminar', where(m.longHole) + ' · ' + plural(m.longHole.s, 'golpe', 'golpes') + ' entre todos') : ''}
     ${m.fastTurn ? rec(esc(m.fastTurn.name) + ' · ' + fmtDur(m.fastTurn.d), 'Embocó más rápido', 'Hoyo ' + (m.fastTurn.h + 1) + ' en ' + plural(m.fastTurn.s, 'golpe', 'golpes') + ' · ' + esc(m.fastTurn.t.name)) : ''}
   </div></section>`;
-  return html;
+  return html + (pm.turns ? practiceCard(pm, label) : '');
+}
+function practiceCard(pm, label){
+  const rows = pm.players.slice().sort((a, b) => (a.avg || 99) - (b.avg || 99));
+  return `<section class="card stack"><div><h2>Entrenamientos <span class="tag prac">Sin puntos</span></h2><p class="sub">Juego solo de ${label}. Sirve para medir tu progreso; no cuenta para el ranking ni los récords.</p></div>
+    <div class="tscroll"><table><thead><tr><th scope="col" style="text-align:left">Jugador</th><th scope="col">Sesiones</th><th scope="col">Terminadas</th><th scope="col">Hoyos</th><th scope="col">Golpes</th><th scope="col">Promedio</th><th scope="col">Mejor ronda</th><th scope="col">Hoyos en 1</th><th scope="col">Tiempo para embocar</th></tr></thead><tbody>
+    ${rows.map(p => `<tr><td class="name" style="text-align:left">${who(p.name, 28)}</td><td>${p.tours}</td><td>${p.done}</td><td>${p.holes}</td><td class="tot">${p.strokes}</td><td>${f1(p.avg)}</td><td>${isFinite(p.bestRound) ? p.bestRound : '–'}</td><td>${p.ones}</td><td>${p.turnN ? fmtDur(p.turnMs / p.turnN) : '–'}</td></tr>`).join('')}
+    </tbody></table></div></section>`;
 }
 
 function viewHist(){
@@ -753,7 +850,7 @@ function viewHist(){
   if (!list.length) return html + `<section class="card empty">${FLAG_SVG}<h2>No hay torneos en ${label}</h2><p class="sub">Los torneos aparecen aquí apenas se empiezan, con su ganador al terminar.</p></section>`;
   html += `<section class="card"><div class="tscroll"><table><thead><tr><th scope="col">Fecha</th><th scope="col" style="text-align:left">Torneo</th><th scope="col">Rondas</th><th scope="col">Jugadores</th><th scope="col" style="text-align:left">Ganador</th><th scope="col">Golpes</th><th scope="col">Estado</th></tr></thead><tbody>
     ${list.map(t => { const w = ranking(t)[0]; const done = t.status === 'done';
-      return `<tr class="row-link" tabindex="0" data-act="open" data-id="${t.id}"><td class="name">${fmtDate(t.createdAt)}</td><td class="name" style="text-align:left">${esc(t.name)}</td><td>${t.rounds}</td><td>${t.players.length}</td><td class="name" style="text-align:left">${done && w ? who(w.name, 24) : '–'}</td><td>${done && w ? w.tot : '–'}</td><td><span class="tag ${done ? 'fin' : 'live'}">${done ? 'Terminado' : 'En juego'}</span></td></tr>`; }).join('')}
+      return `<tr class="row-link" tabindex="0" data-act="open" data-id="${t.id}"><td class="name">${fmtDate(t.createdAt)}</td><td class="name" style="text-align:left">${esc(t.name)}${isPractice(t) ? ' <span class="tag prac">Entrenamiento</span>' : ''}</td><td>${t.rounds}</td><td>${t.players.length}</td><td class="name" style="text-align:left">${done && w && !isPractice(t) ? who(w.name, 24) : '–'}</td><td>${done && w ? w.tot : '–'}</td><td><span class="tag ${done ? 'fin' : 'live'}">${done ? 'Terminado' : 'En juego'}</span></td></tr>`; }).join('')}
   </tbody></table></div></section>`;
   return html;
 }
@@ -820,6 +917,10 @@ document.addEventListener('click', e => {
     case 'golpe': if (t && !S.readOnly) addMove(t, false); break;
     case 'embo': if (t && !S.readOnly) addMove(t, true); break;
     case 'undo': if (t && !S.readOnly) undo(t); break;
+    case 'start-hole': if (t && !S.readOnly) startHole(t); break;
+    case 'pause': if (t && !S.readOnly) pauseHole(t); break;
+    case 'resume': if (t && !S.readOnly) resumeHole(t); break;
+    case 'close-done': S.justDone = null; render(); break;
     case 'rounds': S.form.rounds = +el.dataset.r; render(); break;
     case 'pick': {
       let i = S.form.names.findIndex(n => !n.trim());
@@ -838,10 +939,10 @@ document.addEventListener('click', e => {
     case 'rm-slot': if (S.form.names.length > MINP) { S.form.names.splice(+el.dataset.i, 1); render(); } break;
     case 'rm-tp': {
       const tt = S.tours.find(x => x.id === el.dataset.id);
-      if (!tt || tt.moves.length || S.readOnly) break;
-      if (tt.players.length <= MINP) { toast('Un torneo necesita al menos ' + MINP + ' jugadores.'); break; }
+      if (!tt || hasStrokes(tt) || S.readOnly) break;
+      if (tt.players.length <= MINP) { toast('Debe quedar al menos un jugador.'); break; }
       const gone = tt.players.splice(+el.dataset.p, 1)[0];
-      rebuild(tt); save(tt); toast(gone + ' salió del torneo.'); break;
+      rebuild(tt); save(tt); toast(gone + ' salió del torneo.' + (isPractice(tt) ? ' Queda como entrenamiento: no suma puntos.' : '')); break;
     }
     case 'start': if (!S.readOnly) newTournament(); break;
     case 'show-form': S.showForm = true; render(); break;
@@ -857,6 +958,7 @@ document.addEventListener('click', e => {
       const tt = S.tours.find(x => x.id === id);
       if (!tt || S.readOnly || !tt.moves || !tt.moves.length) break;
       undo(tt); S.playId = tt.id; S.showForm = false; render(); window.scrollTo(0, 0);
+      if (S.justDone === tt.id) S.justDone = null;
       toast('Torneo reabierto. Anota de nuevo el último golpe.'); break;
     }
     case 'ask-delp': S.confirm = 'pl:' + id; render(); break;
